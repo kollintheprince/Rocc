@@ -2,7 +2,8 @@
 # Created by Kollin Prince (kollin.prince@emc.com
 # Co-author Claiton Weeks 
 # This script will find all the unmounted ss/mds disks and output the fsuuid, devpath, if replaceable, and the status in recoverytasks. 
-# New in 1.5.3 Checks health and if internal drives are fully covered. New 1.5.5 See mixed drives
+# 1.5.3 Checks health and if internal drives are fully covered. New 1.5.5 See mixed drives
+# New 1.5.6a trap control c. Improved options and cleaner script
 version=1.5.6a
 ## Check if correct number of options were specified.
 [[ $# -lt 1 ]] || [[ $# -gt 2 ]] && echo -e "\n${red}Invalid number of options, see usage:${clear_color}" && Usage
@@ -202,7 +203,9 @@ replacementdisk () { 				# Checks the status of the recovery and replacement
       ;;
   1:*:*)    echo -e "Disk is set for replaceable, but disk status is incorrect. Please update disk status=6 in the disks table" >> /var/service/local.output
       ;;
-      *)    exit 1 #Cleanup "Something failed... " 144
+  0:*:*)    echo -e "Unable to see one of the following: $replacement $diskstatus $recoverystatus" >> /var/service/local.output
+      ;;
+      *)    Cleanup ;exit  #"Something failed... " 144
       ;;
  esac
 
@@ -248,11 +251,11 @@ internalnum=`awk '/ active / {print $1}' /proc/mdstat`
    dev="Syncing"
    serialnumber="Syncing"
   elif [ `cs_hal info $internalnum | awk '/array disk/ {print $4}' | grep -v : |tr '\n' ',' ` == "sg1" ]; then
-   slotID=" 0"
+   slotID="0"
    dev="/dev/sda"
    serialnumber=`smartctl -i /dev/sg0|awk '/Serial/ {print $3}'` 
   else
-   slotID=" 1"
+   slotID="1"
    dev="/dev/sdb"
    serialnumber=`smartctl -i /dev/sg1| awk '/Serial/ {print $3}'` 
   fi

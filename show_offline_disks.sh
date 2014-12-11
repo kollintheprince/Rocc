@@ -9,7 +9,7 @@
 # 1.5.6b Improved internal disk output
 # 1.5.7 Improved internal disk reliability output and improvement of the -c option
 
-version=1.5.7
+version=1.5.7b
 
 Usage() { # Displays how to run the tool.
   echo "
@@ -88,9 +88,9 @@ assign_sr() { # Assigning the SR to the fsuuid
       echo -e "Serial number detected on Gen ${hardware_gen}"
       for rmg_host in $(show_master.py | awk '/RMG/ {print $3}'); do
         node_uuid=$(psql -U postgres rmg.db -t -h $rmg_host -c "select nodeuuid from disks where uuid='$serialnumber'"|tr -d ' '| grep -v "^$")
-        [[ -n $node_uuid ]] && host=$(psql -U postgres rmg.db -h $rmg_host -t -c "select hostname from nodes where uuid='$node_uuid'"|tr -d ' '| grep -v "^$")
+        [[ -n $node_uuid ]] && { host=$(psql -U postgres rmg.db -h $rmg_host -t -c "select hostname from nodes where uuid='$node_uuid'"|tr -d ' '| grep -v "^$"); }
       done
-      [[ -z $node_uuid ]] && read -p "Not able to find the host, please enter the host: " host
+      [[ -z $node_uuid ]] && { read -p "Not able to find the host, please enter the host: " host; }
       ;;
     [12]:33)
       echo -e "Internal serial number detected on Gen ${hardware_gen}"
@@ -115,12 +115,12 @@ assign_sr() { # Assigning the SR to the fsuuid
   [[ $(grep -c $host /etc/hosts) -eq 0 ]] && { echo -e "The host entered is not found, ${red}${host}${white} please try again" && assign_sr; }
   echo "Adding disk "$assign_disk" to SR"$sr "on host: "$host
   dircheck=$(ssh $host ls /var/service | grep -c fsuuid_SRs)
-  [[ $dircheck -ne 1 ]] && ssh $host /bin/mkdir /var/service/fsuuid_SRs
+  [[ $dircheck -ne 1 ]] && { ssh $host /bin/mkdir /var/service/fsuuid_SRs; }
   ssh $host touch /var/service/fsuuid_SRs/$assign_disk.txt
   if [[ $(ssh $host grep -c $assign_disk /var/service/fsuuid_SRs/$assign_disk.txt) -eq 1 ]]; then
     echo -e "Fsuuid "${yellow}${assign_disk}${white}" already has an SR assigned to it"
     read -p "Are you sure you want to overwrite the previous SR? [yY] [nN]: " yousure
-    [[ $yousure != [yY] ]] && echo 'Exiting'; exit 16
+    [[ $yousure =~ [nN] ]] && { echo 'Exiting'; exit 16; }
   fi
   echo $assign_disk","$sr > /var/service/$assign_disk.tmp
   /usr/bin/scp /var/service/$assign_disk.tmp $host:/var/service/fsuuid_SRs/$assign_disk.txt
@@ -129,7 +129,7 @@ assign_sr() { # Assigning the SR to the fsuuid
 diskhealth() { # Checking the disk health function
   if [[ $type = 'Internal' ]]; then
     diskh=$(cs_hal info $dev | grep SMART | awk '{print $3}') 1>/dev/null 2>/dev/null
-    if [[ "$diskh" = 'FAILED' || -z "$diskh" ]]; then
+    if [[ "$diskh" = 'FAILED:' || -z "$diskh" ]]; then
       diskh=$red"FAILED"$white
     elif [[ "$diskh" = 'SUSPECT' ]]; then
       diskh=${yellow}${diskh}${white}
@@ -162,7 +162,7 @@ SRinput() { # How to assign an SR to an specific fsuuid or serial number
   fi
   [[ -z "$SRnumber" ]] && SR=$(echo -e $red"Needs SR"$white)
 }
-diskreplaceableinfo() {  # Gathering disk replaceable information
+diskreplaceableinfo() { # Gathering disk replaceable information
   serialnumber=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select diskuuid from fsdisks where fsuuid='$disk'"|tr -d ' '| grep -v "^$")
   [[ $(echo $serialnumber | awk '{print length}') -ne 8 ]] && return 1
   diskstatus=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select status from disks where uuid='$serialnumber'"|tr -d ' '| grep -v "^$")
@@ -214,7 +214,7 @@ end() { # Exiting out of the progress bar mode and outputting the finally progre
 }
 replacementdisk () {  # Checks the status of the recovery and replacement
   diskreplaceableinfo
-  case "$1:$2:$3" in                    # echo "Replacement: $replacement  Disk status: $diskstatus  RecoveryStatus: $recoverystatus"
+  case "$1:$2:$3" in    # echo "Replacement: $replacement  Disk status: $diskstatus  RecoveryStatus: $recoverystatus"
     0:[46]:1)    echo -e "Replaceable="$red"No"$white "RecoveryStatus="$yellow"Cancelled/Paused"$white "Recovery="$Rpercent >> /var/service/local.output
         ;;
     0:[46]:2)    echo -e $green"Recovery completed,"$white" however the replaceable bit needs to be changed to a 1 in the disks table"  >> /var/service/local.output
@@ -227,9 +227,9 @@ replacementdisk () {  # Checks the status of the recovery and replacement
         ;;
     1:6:[13456]) echo "The disk is set for replaceable, but the recovery has not completed... Please correct the status before dispatching." >> /var/service/local.output
         ;;
-    1:6:2)       touch /var/service/fsuuid_SRs/$disk.txt
+    1:[46]:2)       touch /var/service/fsuuid_SRs/$disk.txt
       [[ $(grep -c "^" /var/service/fsuuid_SRs/$disk.txt) -eq 1 ]] && for log in $(ls -t /var/log/maui/cm.log*); do
-          bzgrep -m1 "Successfully updated replacable bit for $serialnumber" $log | awk -F\" '{print $2}' >> /var/service/fsuuid_SRs/$disk.txt && break; done
+        bzgrep -m1 "Successfully updated replacable bit for $serialnumber" $log | awk -F\" '{print $2}' >> /var/service/fsuuid_SRs/$disk.txt && break; done
       [[ $(cat /var/service/fsuuid_SRs/$disk.txt | wc -l) -eq 1 ]] && date >> /var/service/fsuuid_SRs/$disk.txt
       setreplaced=$(tail -1 /var/service/fsuuid_SRs/$disk.txt)
       datereplaceable=$(date +%s --date="$setreplaced")
@@ -250,7 +250,7 @@ replacementdisk () {  # Checks the status of the recovery and replacement
         ;;
   esac
 
-  [[ $ifmixed ]] && A_MDS_temp=$(awk -v pattern=${disk} -F '/|mds_' '/EnvRoot/ {n=$0};$n ~ pattern {p=$6};END {if(p) print "${red}\""p"\"${white}";else print "${cyan}\"None Found\"${white}"}' /etc/maui/mds/*/mds_cfg.xml); eval echo -e "Associated MDSs: $A_MDS_temp" >> /var/service/local.output
+  [[ "${ifmixed}" -eq 1 ]] && { A_MDS_temp=$(awk -v pattern=${disk} -F '/|mds_' '/EnvRoot/ {n=$0};$n ~ pattern {p=$6};END {if(p) print "${red}\""p"\"${white}";else print "${cyan}\"None Found\"${white}"}' /etc/maui/mds/*/mds_cfg.xml); eval echo -e "Associated MDSs: $A_MDS_temp" >> /var/service/local.output; }
   return 0
 }
 outputinfo() { #Set up for what will be outputted to the user.
@@ -302,7 +302,7 @@ case "${hardware_gen}" in
       elif [[ $(cs_hal info $internalnum | awk '/array disk/ {print $4}' | grep -v : |tr '\n' ' ') == 'sg1' ]]; then
         slotID='0'; dev=$(sg_map |awk '/sg0/ {print $2}'); serialnumber=$(smartctl -i /dev/sg0|awk '/Serial/ {print $3}')
       else
-        slotID='1'; dev=$(sg_map |awk '/sg1/ {print $2}'); serialnumber=$(smartctl -i /dev/sg1| awk '/Serial/ {print $3}')
+        slotID='1'; dev=$(sg_map |awk '/sg1 / {print $2}'); serialnumber=$(smartctl -i /dev/sg1| awk '/Serial/ {print $3}')
       fi
       disk=$serialnumber
       SRinput
@@ -321,7 +321,7 @@ esac
 }
 localrun() { # Finds the un-mounted DAE drives
   nodeip=$(/bin/hostname -i) # Running on the local node to find missing disks and output their information
-  [[ ! -d /var/service/fsuuid_SRs ]] && { /bin/mkdir /var/service/fsuuid_SRs }
+  [[ ! -d /var/service/fsuuid_SRs ]] && { /bin/mkdir /var/service/fsuuid_SRs; }
   if [[ $(awk '/hardware/ {print length($3)}' /etc/maui/reporting/tla_reporting.conf) -eq 14 ]]; then #Finds the hardware serialnumber
     TLA=$(awk '/hardware/ {print ($3)}' /etc/maui/reporting/tla_reporting.conf)
   else
@@ -384,18 +384,18 @@ localrun() { # Finds the un-mounted DAE drives
             manslotreplaced='true'
           fi
           slotreplaced=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select slot_replaced from disks where serialnumber='$serialnumber'"|tr -d ' ' | grep -v '^$')
-          [[ $slotreplaced -eq 1 && $manslotreplaced = 'true' ]] && continue
+          [[ $slotreplaced -eq 1 && $manslotreplaced = 'true' ]] && { continue; }
           mdsnumbermissdisk=$(($mdsdisktotal-$(($mdsdiskseen+$mdsdiskcounter))))
           mdsdiskcounter=$(($mdsdiskcounter+1))
           type='MDS' # Should only pull up if it is an mds disk.
           outputinfo
-          AMDSs=$(grep EnvRoot /etc/maui/mds/*/mds_cfg.xml | awk -F "/" '/$disk/{print $5}'| tr '\n' ',' | cut -d ',' -f1-)
+          AMDSs=$(grep $disk /etc/maui/mds/*/mds_cfg.xml | awk -F '/' '{print $5}' | tr '\n' ',' | cut -d ',' -f1-)
           if [[ $replacement -eq 0 || $diskstatus -eq 1 ]]; then
             echo -e "Replaceable="$red"No"$white "Associated MDSs: "${cyan}${AMDSs}${white} >> /var/service/local.output
             echo "Please check the disk table for this mds disk" >> /var/service/local.output
             echo "" >> /var/service/local.output
           else
-            echo -e "Replaceable="$green"Yes"$white "DiskSize="${yellow}${disksize}"TB"$white "Associated MDSs:"${cyan}${AMDSs}${white} >> /var/service/local.output
+            echo -e "Replaceable="$green"Yes"$white "DiskSize="${yellow}${disksize}"TB"$white "Associated MDSs: "${cyan}${AMDSs}${white} >> /var/service/local.output
             echo "" >> /var/service/local.output
           fi
         fi
@@ -429,6 +429,7 @@ localrun() { # Finds the un-mounted DAE drives
           diskcounter=$(($diskcounter+1))
           disk='Not Found'; type='Not Configured'
           outputinfo
+          echo ""  >> /var/service/local.output
         fi
       done
     fi
@@ -450,7 +451,7 @@ allrun() { # Running the check on all nodes with the option of an report of what
     do
     ssh $x /var/service/show_offline_disks.sh -l >> /var/service/output.txt 2>&1 &
   done
-  count=$(ps -ef | grep -v grep | grep -v bash| grep -v scp | grep -c show_offline_disks )
+  count=$(ps -ef | grep -v grep | grep -v bash| grep -v scp | grep -c show_offline_disks)
   while [[ $count -ne 0 ]];
     do
     count=$(ps -ef | grep -v grep | grep -v bash| grep -v scp | grep -c show_offline_disks)
@@ -469,7 +470,7 @@ allrun() { # Running the check on all nodes with the option of an report of what
     then
     echo -e $green"No failed disks found"$white
   else
-    cat /var/service/output.txt | grep -v ssh_exchange_identification
+    grep -v ssh_exchange_identification /var/service/output.txt 
   fi
 }
 endreport() { # Set up for what will be outputted to the users in the -ar or -ra option. The end report

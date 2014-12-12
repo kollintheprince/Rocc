@@ -107,7 +107,7 @@ assign_sr() { # Assigning the SR to the fsuuid
       ;;
     [123]:*)
       echo -e "Invalid Input, please try again."
-      assign sr
+      assign_sr
       ;;
   esac
   read -p "Enter the SR number: " -t 60 -n 8 sr; echo

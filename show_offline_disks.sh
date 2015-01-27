@@ -1,15 +1,16 @@
 #!/bin/bash
-# Created by Kollin Prince (kollin.prince@emc.com
+# Created by Kollin Prince (kollin.prince@emc.com)
 # Co-author Claiton Weeks
 ################################
 # This script will find all the unmounted ss/mds disks and output the fsuuid, devpath, if replaceable, and the status in recoverytasks.
 ################################
-# 1.5.3 Checks health and if internal drives are fully covered. New 1.5.5 See mixed drives
 # New 1.5.6a trap control c. Improved options and cleaner script
 # 1.5.6b Improved internal disk output
 # 1.5.7 Improved internal disk reliability output and improvement of the -c option
+# 1.5.8 Outputting the disk has been in recovery and also how many times the disk has been added with add_disk.sh.
+# See more at https://github.com/kollintheprince/Rocc/commit/441b42effb1a232b3b7d80b627349d7f1773deb4
 
-version=1.5.7b
+version=1.5.8
 
 Usage() { # Displays how to run the tool.
   echo "
@@ -36,6 +37,8 @@ magenta='\E[35m'
 cyan='\E[36m'
 white='\E[1;37m'
 orange='\E[0;33m'
+blink='\E[5m'  # Only works on konsole and xterm
+normal='\E[0m'
 touch /var/service/local.output; touch /var/service/output.txt
 
 TotalPdisks=$(awk -F "<theoreticalDiskNum>|</theoreticalDiskNum>" '/theoreticalDiskNum/{print $2}' /var/local/maui/atmos-diskman/NODE/$(hostname)/latest.xml)
@@ -97,7 +100,7 @@ assign_sr() { # Assigning the SR to the fsuuid
       read -p "Please enter the host of the disk: " host
       ;;
     [123]:36)
-      [[ ! "${assign_disk}" =~ $valid_fsuuid ]] && { echo -e "Invalid fsuuid entered, ${red}${assign_disk}${white}" && assign_sr; }
+      [[ ! "${assign_disk}" =~ $valid_fsuuid ]] && { echo -e "Invalid fsuuid entered, ${red}${assign_disk}${white}" && assign_sr && exit; }
       echo -e "fsuuid validation"$green "Passed"$white
       for rmg_host in $(show_master.py | awk '/RMG/ {print $3}'); do
         host=$(psql -U postgres rmg.db -h $rmg_host -t -c "select hostname from filesystems where uuid='$assign_disk'"|tr -d ' '| grep -v "^$")
@@ -111,16 +114,16 @@ assign_sr() { # Assigning the SR to the fsuuid
       ;;
   esac
   read -p "Enter the SR number: " -t 60 -n 8 sr; echo
-  [[ $sr != [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] ]] && { echo -e "Invalid Service Request Number, ${red}${sr}${white} please try again" && assign_sr; }
-  [[ $(grep -c $host /etc/hosts) -eq 0 ]] && { echo -e "The host entered is not found, ${red}${host}${white} please try again" && assign_sr; }
+  [[ $sr != [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] ]] && { echo -e "Invalid Service Request Number, ${red}${sr}${white} please try again" && assign_sr && exit; }
+  [[ $(grep -c $host /etc/hosts) -eq 0 ]] && { echo -e "The host entered is not found, ${red}${host}${white} please try again" && assign_sr && exit; }
   echo "Adding disk "$assign_disk" to SR"$sr "on host: "$host
   dircheck=$(ssh $host ls /var/service | grep -c fsuuid_SRs)
   [[ $dircheck -ne 1 ]] && { ssh $host /bin/mkdir /var/service/fsuuid_SRs; }
-  ssh $host touch /var/service/fsuuid_SRs/$assign_disk.txt
-  if [[ $(ssh $host grep -c $assign_disk /var/service/fsuuid_SRs/$assign_disk.txt) -eq 1 ]]; then
+  ssh $host touch /var/service/fsuuid_SRs/${assign_disk}.txt
+  if [[ $(ssh $host grep -c $assign_disk /var/service/fsuuid_SRs/${assign_disk}.txt) -eq 1 ]]; then
     echo -e "Fsuuid "${yellow}${assign_disk}${white}" already has an SR assigned to it"
     read -p "Are you sure you want to overwrite the previous SR? [yY] [nN]: " yousure
-    [[ $yousure =~ [nN] ]] && { echo 'Exiting'; exit 16; }
+    [[ $yousure =~ [nN] ]] && { echo 'Exiting'; exit 16; } 
   fi
   echo $assign_disk","$sr > /var/service/$assign_disk.tmp
   /usr/bin/scp /var/service/$assign_disk.tmp $host:/var/service/fsuuid_SRs/$assign_disk.txt
@@ -160,7 +163,7 @@ SRinput() { # How to assign an SR to an specific fsuuid or serial number
   else
     SR=$(echo -e $red"Needs SR"$white)
   fi
-  [[ -z "$SRnumber" ]] && SR=$(echo -e $red"Needs SR"$white)
+  [[ -z "$SRnumber" ]] && { SR=$(echo -e $red"Needs SR"$white); }
 }
 diskreplaceableinfo() { # Gathering disk replaceable information
   serialnumber=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select diskuuid from fsdisks where fsuuid='$disk'"|tr -d ' '| grep -v "^$")
@@ -169,7 +172,7 @@ diskreplaceableinfo() { # Gathering disk replaceable information
   replacement=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select replacable from disks where uuid='$serialnumber'"|tr -d ' '| grep -v "^$")
   unrec=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select unrecoverobj from recoverytasks where fsuuid='${disk}'"| awk 'NR==1{print $1}')
   imprec=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select impactobj from recoverytasks where fsuuid='${disk}'"| awk 'NR==1{print $1}')
-  [[ $(echo ${#unrec}) -eq 0 ]] && Rpercent=$(echo -e $cyan"Not found"$white) || \
+  [[ $(echo ${#unrec}) -eq 0 ]] && Rpercent=$(echo -e $cyan"Not found"$white)
   [[ $unrec -eq 0 || $imprec -eq 0 ]] && percent=0 || percent=$(echo "scale=6; 100-$unrec*100/$imprec"|bc|cut -c1-5)
   Rpercent=$(echo -e $yellow$percent"%"$white "Unrecovered: "$yellow$unrec$white)
 }
@@ -193,7 +196,7 @@ DRAW(){ echo -en "\033%";echo -en "\033(0";}
 WRITE(){ echo -en "\033(B";}
 HIDECURSOR(){ echo -en "\033[?25l";}
 NORM(){ echo -en "\033[?12l\033[?25h";}
-begin() { #part of the progress bar to begin the set up.
+begin() { # Part of the progress bar to begin the set up.
   clear
   HIDECURSOR
   echo -e ""
@@ -205,16 +208,16 @@ begin() { #part of the progress bar to begin the set up.
   echo -e "    mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj"
   WRITE
 }
-end() { # Exiting out of the progress bar mode and outputting the finally progress made
+end() { # Exiting out of the progress bar mode and outputting the finally progress made.
   realcount=$(($total-$count))
   progress $realcount $total
   PUT 10 12
   echo -e ""
   NORM
 }
-replacementdisk () {  # Checks the status of the recovery and replacement
+replacementdisk () {  # Checks the status of the recovery and replacement.
   diskreplaceableinfo
-  case "$1:$2:$3" in    # echo "Replacement: $replacement  Disk status: $diskstatus  RecoveryStatus: $recoverystatus"
+  case "$1:$2:$3" in    # echo "Replacement: $replacement  Disk status: $diskstatus  RecoveryStatus: $recoverystatus".
     0:[46]:1)    echo -e "Replaceable="$red"No"$white "RecoveryStatus="$yellow"Cancelled/Paused"$white "Recovery="$Rpercent >> /var/service/local.output
         ;;
     0:[46]:2)    echo -e $green"Recovery completed,"$white" however the replaceable bit needs to be changed to a 1 in the disks table"  >> /var/service/local.output
@@ -227,15 +230,15 @@ replacementdisk () {  # Checks the status of the recovery and replacement
         ;;
     1:6:[13456]) echo "The disk is set for replaceable, but the recovery has not completed... Please correct the status before dispatching." >> /var/service/local.output
         ;;
-    1:[46]:2)       touch /var/service/fsuuid_SRs/$disk.txt
-      [[ $(grep -c "^" /var/service/fsuuid_SRs/$disk.txt) -eq 1 ]] && for log in $(ls -t /var/log/maui/cm.log*); do
-        bzgrep -m1 "Successfully updated replacable bit for $serialnumber" $log | awk -F\" '{print $2}' >> /var/service/fsuuid_SRs/$disk.txt && break; done
-      [[ $(cat /var/service/fsuuid_SRs/$disk.txt | wc -l) -eq 1 ]] && date >> /var/service/fsuuid_SRs/$disk.txt
-      setreplaced=$(tail -1 /var/service/fsuuid_SRs/$disk.txt)
+    1:[46]:2)       touch /var/service/fsuuid_SRs/${disk}.info
+      [[ $(grep -c "Date_replaced" /var/service/fsuuid_SRs/$disk.info) -lt 1 ]] && for log in $(ls -t /var/log/maui/cm.log*); do
+        date_found=$(bzgrep -m1 "Successfully updated replacable bit for $serialnumber" $log | awk -F\" '{print $2}') && echo "Date_replaceable=$date_found" >> /var/service/fsuuid_SRs/$disk.info && break
+        done
+      [[ $(grep -c "Date_replaced" /var/service/fsuuid_SRs/$disk.txt 2> /dev/null) -eq 0 ]] && echo "Date_replaceable=$(date)" >> /var/service/fsuuid_SRs/$disk.info
+      setreplaced=$(awk -F '=' '/Date_replaced/{print $2}' /var/service/fsuuid_SRs/$disk.info)
       datereplaceable=$(date +%s --date="$setreplaced")
-      dateplusseven=$((604800+$datereplaceable))
-      pastseven=''
-      [[ $(date +%s) -ge $dateplusseven ]] && pastseven=$(echo "Disk has been replaceable since $setreplaced, please check the SR")
+      dateplusseven=$((604800+$datereplaceable)); pastseven=''
+      [[ $(date +%s) -ge $dateplusseven ]] && pastseven=$(echo "The Disk has been replaceable since $setreplaced, please check the SR")
       echo -e "Replaceable="$green"Yes"$white "DiskSize="${yellow}${disksize}"TB"$white $pastseven >> /var/service/local.output
         ;;
     1:4:*)    echo "The disk is set for replaceable, Disk status is set to 4. The disk may not been seen by the hardware" >> /var/service/local.output
@@ -244,20 +247,33 @@ replacementdisk () {  # Checks the status of the recovery and replacement
         ;;
     1:*:*)    echo -e "Disk is set for replaceable, but disk status is incorrect. Please update disk status=6 in the disks table" >> /var/service/local.output
         ;;
-    0:*:*)    echo -e "Unable to see one of the following: $replacement $diskstatus $recoverystatus" >> /var/service/local.output
+    0:204:*)  echo -e "Disk is in 204 status, please investigating the disk"
+        ;;
+    0:*:*)    echo -e "Unable to see one of the following: replacement: $replacement diskstatus: $diskstatus recoverystatus: $recoverystatus" >> /var/service/local.output
         ;;
         *)    echo -e "Something failed....."
         ;;
   esac
-
-  [[ "${ifmixed}" -eq 1 ]] && { A_MDS_temp=$(awk -v pattern=${disk} -F '/|mds_' '/EnvRoot/ {n=$0};$n ~ pattern {p=$6};END {if(p) print "${red}\""p"\"${white}";else print "${cyan}\"None Found\"${white}"}' /etc/maui/mds/*/mds_cfg.xml); eval echo -e "Associated MDSs: $A_MDS_temp" >> /var/service/local.output; }
+  [[ -f /var/service/fsuuid_SRs/${disk}.info ]] || { touch /var/service/fsuuid_SRs/${disk}.info; }
+  disk_added=$(awk -F '=' '/add_disk/{print $2}' /var/service/fsuuid_SRs/${disk}.info)
+  [[ -z $disk_added ]] && { disk_added_number=''; } || { disk_added_number=" Disk Added: ${red}${disk_added}${white}"; }
+  All_MDSs=$(grep $disk /etc/maui/mds/*/mds_cfg.xml | awk -F '/' '{print $5}' | tr '\n' ',' | cut -d ',' -f1-); 
+  [[ -n ${All_MDSs} ]] && { output_All_MDSs="Associated MDS: ${red}${All_MDSs}${white} ${disk_added_number}"; } || { output_All_MDSs="Associated MDSs: ${cyan}None Found${white}"; }; echo -e "${output_All_MDSs} ${disk_added_number}" >> /var/service/local.output
   return 0
 }
 outputinfo() { #Set up for what will be outputted to the user.
   diskhealth
-  echo -e $white"Host: "${orange}${host_name} $white"IP:" ${orange}${nodeip} $white>> /var/service/local.output
+  if [[ -f /usr/local/xdoctor/archive/dr/history/${disk}.xml ]]; then
+    start_time=$(xmllint --format /usr/local/xdoctor/archive/dr/history/${disk}.xml|awk -F 'statustime=\"|\" unrecoverobj=' '/statustime/{print $2}'|sort|head -1|awk -F '.' '{print $1}')
+    date_diff=$(echo "$((($(date +%s)-$start_time)/86400))"); show_days=$date_diff
+    [[ $date_diff -ge 6 && $date_diff -le 9 ]] && { show_days=$(echo -e ${yellow}${date_diff}); }
+    [[ $date_diff -ge 10 ]] && { show_days=$(echo -e ${red}${blink}${date_diff}); }
+  else
+    show_days=$(echo -e $yellow"Unknown"$white)
+  fi
+  echo -e $white"Host: "${orange}${host_name} $white"IP:" ${orange}${nodeip} $white"Days:" ${show_days} $white >> /var/service/local.output
   echo -e "TLA: "${cyan}${TLA}${white} "SiteID: "${cyan}${site}${white} "SR: "$SR >> /var/service/local.output
-  echo -e "Devpath: "${red}${dev} $white"FSUUID: "${red}${disk} $white >> /var/service/local.output
+  echo -e "Devpath: "${red}${dev} $white"FSUUID: "${red}${disk} ${white} >> /var/service/local.output
   echo -e "Disk_type: "${yellow}${type}${white} "slotID: "${yellow}${slotID}${white} "Health: "$diskh "SN: "${yellow}${serialnumber}${white}  >> /var/service/local.output
 }
 
@@ -299,10 +315,10 @@ case "${hardware_gen}" in
     if [[ $(cs_hal info $internalnum | awk '/status/ {print $3}') = 'REDUNDANCY_LOST' ]]; then
       if [[ $(cs_hal info $internalnum| awk '/array disk count/ {print $5}') -eq  2 ]]; then
         slotID=' Syncing'; dev='Syncing'; serialnumber='Syncing'
-      elif [[ $(cs_hal info $internalnum | awk '/array disk/ {print $4}' | grep -v : |tr '\n' ' ') == 'sg1' ]]; then
+      elif [[ $(cs_hal info $internalnum | awk '/array disk/ {print $4}' | grep -v :) == 'sg1' ]]; then
         slotID='0'; dev=$(sg_map |awk '/sg0/ {print $2}'); serialnumber=$(smartctl -i /dev/sg0|awk '/Serial/ {print $3}')
       else
-        slotID='1'; dev=$(sg_map |awk '/sg1 / {print $2}'); serialnumber=$(smartctl -i /dev/sg1| awk '/Serial/ {print $3}')
+        slotID='1'; dev=$(sg_map |awk '/sg1 / {print $2}'); serialnumber=$(smartctl -i /dev/sg1|awk '/Serial/ {print $3}')
       fi
       disk=$serialnumber
       SRinput
@@ -359,19 +375,19 @@ localrun() { # Finds the un-mounted DAE drives
           manslotreplaced='true'
         fi
         slotreplaced=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select slot_replaced from disks where serialnumber='$serialnumber'" |tr -d ' ' | grep -v '^$')
-        [[ $slotreplaced -eq 1 && $manslotreplaced = 'true' ]] && continue #Checks if has been replaced and if it has it will continue to the next fsuuid found in the loop.
+        [[ $slotreplaced -eq 1 && $manslotreplaced = 'true' ]] && continue # Checks if has been replaced and if it has it will continue to the next fsuuid found in the loop.
         diskcounter=$(($diskcounter+1))
         SRinput
         outputinfo
         recoverystatus=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select status from recoverytasks where fsuuid='$disk'"|tr -d ' '| grep -v "^$")
-        replacementdisk $replacement $diskstatus $recoverystatus
+        replacementdisk $replacement $diskstatus $recoverystatus; unset disk_added_number
         echo ""  >> /var/service/local.output
       fi
     done
     mdsdiskcounter=0
     if [[ $mdsdisktotal -gt $(($mdsdiskseen+$mdsdiskcounter)) ]]; then # Checks if mds disks are missing
-      for disk in $(psql -U postgres rmg.db -h $rmgmaster -c "select mnt,uuid from filesystems where hostname='$host_name'"| awk '/atmos/ {print $3}'); do #Pulls a list from the rmg.db of mds disks
-        if ! grep -q $disk /proc/mounts; then # comparing the list found in the rmg.db to what is mounted
+      for disk in $(psql -U postgres rmg.db -h $rmgmaster -c "select mnt,uuid from filesystems where hostname='$host_name'"| awk '/atmos/ {print $3}'); do # Pulls a list from the rmg.db of mds disks
+        if ! grep -q $disk /proc/mounts; then # Comparing the list found in the rmg.db to what is mounted
           SRinput
           serialnumber=$(grep parentUniqueId /var/local/maui/atmos-diskman/FILESYSTEM/$disk/latest.xml | awk -F '-' '{print $1}' | awk -F '>' '{print $2}')
           diskstatus=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select status from disks where serialnumber='$serialnumber'"|tr -d ' ' | grep -v '^$')
@@ -389,14 +405,14 @@ localrun() { # Finds the un-mounted DAE drives
           mdsdiskcounter=$(($mdsdiskcounter+1))
           type='MDS' # Should only pull up if it is an mds disk.
           outputinfo
-          AMDSs=$(grep $disk /etc/maui/mds/*/mds_cfg.xml | awk -F '/' '{print $5}' | tr '\n' ',' | cut -d ',' -f1-)
+          AMDSs=$(grep $disk /etc/maui/mds/*/mds_cfg.xml | awk -F '/' '{print $5}' | tr '\n' ',' | cut -d ',' -f1-); [[ -z $AMDSs ]] && { AMDSs='None Found'; }
           if [[ $replacement -eq 0 || $diskstatus -eq 1 ]]; then
             echo -e "Replaceable="$red"No"$white "Associated MDSs: "${cyan}${AMDSs}${white} >> /var/service/local.output
             echo "Please check the disk table for this mds disk" >> /var/service/local.output
-            echo "" >> /var/service/local.output
+            echo "${disk_added_number}" >> /var/service/local.output
           else
             echo -e "Replaceable="$green"Yes"$white "DiskSize="${yellow}${disksize}"TB"$white "Associated MDSs: "${cyan}${AMDSs}${white} >> /var/service/local.output
-            echo "" >> /var/service/local.output
+            echo "${disk_added_number}" >> /var/service/local.output
           fi
         fi
       done

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Created by Kollin Prince (kollin.prince@emc.com) -- BEATLE ONLY --
 #### Created to help automate disk recoveries that need manual intervention 
-version=1.0.3b
+version=1.0.4a
 trap control_c SIGINT
 control_c() { # Runs, if user hits control-c
   echo -e "\n## Ouch! Keyboard interrupt detected.\n## Cleaning up..."
@@ -11,6 +11,8 @@ control_c() { # Runs, if user hits control-c
   /bin/rm -f /var/tmp/${fsuuid}.oids 2>&1
   exit 
 }
+#admin users
+#admin_list='0370fd3358358612ff56f17d13946106 40ca4d8fec6151ffe5681be530615826 26b0e8a13b162b92b80122532bfa8eab ' If needed to lock down who sees the investigation report
 Usage() { # Displays how to run the tool.
   echo "
 This script will help automate disk recoveries that need manual intervention by querying the impacted objects and running
@@ -64,7 +66,7 @@ begin() { # Part of the progress bar to begin the set up.
   echo -e "    mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj"
   WRITE
 }
-end() { # Exiting out of the progress bar mode and outputting the finally progress made
+end() { # Exiting out of the progress bar mode and outputting the final progress made
   realcount=$(($total-$count))
   progress $realcount $total
   PUT 10 12
@@ -177,8 +179,7 @@ fix_needs_recover() { # Steps to either see if possible garbage or just needs cc
     mastermds_host=$(grep MdsMaster: /var/tmp/output.txt| awk '{print $2}' | awk -F ':' '{print $1}')
     size=$(grep size: /var/tmp/output.txt| head -1 | awk '{print $2}') 
     maui_size=$(grep x-maui-create-size: /var/tmp/output.txt| awk '{print $2}')
-    [[ $size -lt $maui_size ]] && { echo "$oid,$tenantid,$port" >> ${full_dir_path}/NeedsWork && count=$(($count+1)) && progress $count $total && echo -e "maui-create-size and size does not match: maui_size=$maui_size, size=$size ${yellow}${oid}$white... " >> $output_log && continue; }
-		echo -e $(mauisvcmgr -s mauicc -c trigger_cc_checkObj -a "objid=$oid,tenant=$tenantid,port=$port" -m $mastermds_host) js_restart=$js_restart_num >> $output_log
+    echo -e $(mauisvcmgr -s mauicc -c trigger_cc_checkObj -a "objid=$oid,tenant=$tenantid,port=$port" -m $mastermds_host) js_restart=$js_restart_num >> $output_log
 		second=$(mauisvcmgr -s mauicc -c trigger_cc_checkObj -a "objid=$oid,tenant=$tenantid,port=10301")
 		count=$(($count+1)); progress $count $total
 	done
@@ -204,8 +205,7 @@ obj_repair() { # Steps to fix stubborn objects
 		count=$(($count+1)); mancheck=0
 		while [ "$check" != "PASS" ]; do	
 			mauiobjbrowser -t $tenantid -i $oid -x > tmp;/var/service/AET/workdir/tools/Recovery/objrepair.py -f tmp -t $tenantid | egrep 'mauiobjchk|mauisvcmgr' 2>&1 > commands
-			chmod +x commands
-			do=$(./commands 2<&1)
+			do=$(bash ./commands 2<&1)
 			if [ "$check" != "PASS" ]; then
 				counter=$(($counter+1))
 				if [ $counter -eq 5 ]; then
@@ -228,14 +228,45 @@ CRS () {
 	codenum=$(grep -A 15 'Replica #1' output.tmp |awk '/code/ {print $3}')
 	totalnum=$(($datanum+$codenum)); rep_num="Replica #$(($x)):"; rep_num_plus="Replica #$(($x+1))"
   echo "Replica #$((x))" >> ${full_dir_path}/Val_count.output
-  awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|egrep 'type:|current:' >> ${full_dir_path}/Val_count.output
-	awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|egrep 'Size|OSD'|sort|uniq -c >> ${full_dir_path}/Val_count.output
+  awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|egrep 'type:|current:|OSD|SS:|Size|revision:' >> ${full_dir_path}/Val_count.output
+	echo -e "Column count:\n$(awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|grep -v 'OSD ID'|egrep 'Size|OSD'|sort|uniq -c)" >> ${full_dir_path}/Val_count.output
 }
 mirror () {
   rep_num="Replica #$(($x)):"; rep_num_plus="Replica #$(($x+1))"
   echo "Replica #$((x))" >> ${full_dir_path}/Val_count.output
-  awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|egrep 'type:|current:|Total pieces:' >> ${full_dir_path}/Val_count.output
-	awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|egrep 'Size|OSD'|sort|uniq -c >> ${full_dir_path}/Val_count.output
+  awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|egrep 'type:|current:|Total pieces:|SS:|OSD ID' >> ${full_dir_path}/Val_count.output
+	echo "Column count:$(awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|grep -v 'OSD ID'|egrep 'Size|OSD'|sort|uniq -c)" >> ${full_dir_path}/Val_count.output
+}
+first_rep_check_EC () { # EC object pattern function
+  [[ $algorithm != 'CRS' ]] && { return; }
+  rep_num="Replica #1:"; rep_num_plus="Replica #2:"
+  column_check=$(awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|grep -v 'OSD ID'|egrep 'Size|OSD'|sort|uniq -c|egrep ' 9 | 10 | 11 | 12 ' -c )
+  [[ $column_check -ge 1 && $algorithm = 'CRS' ]] && { echo $oid >> ${full_dir_path}/repair_obj;return; }
+  [[ $(awk "/$rep_num_plus/{p=0};p;/$rep_num/{p=1}" output.tmp|egrep -v 'Size on disk:|OSD ID'|egrep 'Size|OSD'|sort|uniq -c|grep " [1][0-2] " -c) -ge 1 && $algorithm = 'CRS' ]] && { echo -e "Failed delete on EC object on oid: $valoid" >> ${full_dir_path}/EC_failed_delete;return; }
+  if [[ $column_check -lt 1 && $algorithm = 'CRS' ]]; then 
+    maui_create_size=$(awk '/maui-create/{print $2}' output.tmp); size=$(awk '/size:/{print $2}' output.tmp |head -1)
+    current=$(awk '/current:/ {print $2}' output.tmp|head -1)
+    [[ $current = 'yes' ]] && { echo -e "Error column with current yes oid: $valoid" >> ${full_dir_path}/error_yes; return; }
+    [[ $maui_create_size -gt $size && $current = 'no' ]] && { echo -e "Error column failed write detected on oid: $valoid" >> ${full_dir_path}/EC_failed_write;return; }
+    [[ $maui_create_size -eq $size && $current = 'no' ]] && { echo -e "Error column and same size detected on oid: $valoid" >> ${full_dir_path}/EC_bug;return; }
+  fi
+}
+mirror_obj_check() { # mirror object pattern function
+  mirror_on=$(grep -c algorithm output.tmp)
+  size_on_disk=$(grep -A 20 sync_ output.tmp |grep -c 'Size on disk:')
+  column_not_created=$(grep -c 'no OSD object created' output.tmp)
+  case "$mirror_on:$size_on_disk:$column_not_created" in
+    0:[1-6]:[0-9])  echo $oid >> ${full_dir_path}/repair_obj
+    ;;
+    0:[1-6]:[0-1][0-9])  echo $oid >> ${full_dir_path}/repair_obj
+    ;;
+    0:0:[0-9])  echo $oid >> ${full_dir_path}/repair_obj
+    ;;
+    0:0:[0-1][0-9])  echo $oid >> ${full_dir_path}/repair_obj
+    ;;
+    0:*:*) echo $oid >> ${full_dir_path}/unknown # Send back to kollin.prince@emc.com to input the new pattern that wasn't detected
+    ;;
+  esac
 }
 column_count() { # Help determines if the objects in the list is garbage by giving the size on disk with it sorted and counted
 val_count=0
@@ -256,6 +287,8 @@ for valoid in $(cat ${full_dir_path}/NeedsWork); do
 	done
   mauicreatesize=$(grep x-maui-create output.tmp | awk '{print $2}')
   correctsize=$(echo "$mauicreatesize/9"|bc)
+  first_rep_check_EC
+  mirror_obj_check
   echo "Column size should equal around: $correctsize" >> ${full_dir_path}/Val_count.output; val_count=$(($val_count+1))
   echo -ne "Objects counted: $val_count/$(cat ${full_dir_path}/NeedsWork |wc -l)" '\r'
 done
@@ -314,23 +347,46 @@ main(){ # Main code
   else
     echo -e $yellow" 0 Objects found, skipping work section... "$white; touch ${full_dir_path}/repair.log
   fi
-  needs_val=$(cat ${full_dir_path}/NeedsValidation |wc -l 2>&1)
-  [[ -f ${full_dir_path}/NeedsValidation ]] && cat ${full_dir_path}/NeedsValidation >> ${full_dir_path}/NeedsWork
-  [[ $needs_val -ne 0 || -f ${full_dir_path}/NeedsWork ]] && { column_count; }
+ # for check_pass in $(echo $admin_list); do
+ #   [[ -z $passphase ]] && { pass=no; break; }; md5_check=$(echo -n $passphase|md5sum|awk '{print $1}')
+ #   [[ ${check_pass} = ${md5_check} ]] && { pass=yes; echo -e "Admin user $passphase detected"; echo "$(date): User $passphase" >> ${full_dir_path}/Val_count.output; break; }
+ # done
+  #line_des=$(history | grep -v grep|grep 'auto_recover.sh -p'|awk '{print $1}'|sort -r); for num in $line_des; do history -d $num;done # Removing passphase history
+  needs_val=$(cat ${full_dir_path}/NeedsValidation |wc -l 2>&1); timedir=$(date +%s);mkdir /var/tmp/${timedir}_Obj; pass=yes
+  [[ -f ${full_dir_path}/NeedsValidation ]] && { cat ${full_dir_path}/NeedsValidation >> ${full_dir_path}/NeedsWork; }
+  [[ $needs_val -ne 0 || -f ${full_dir_path}/NeedsWork ]] && { column_count; touch ${full_dir_path}/EC_bug ${full_dir_path}/EC_failed_write ${full_dir_path}/EC_failed_delete ${full_dir_path}/repair_obj ${full_dir_path}/unknown; }
+  AET_version=$(ls -ltr /var/service/AET|grep workdir|awk '{print $NF}'|awk -F '-' '{print $2}')
+  case "$AET_version" in 
+    2.2.[0-4])    cmd="Obj_Recover.py -t $tid -l ${full_dir_path}/repair_obj -w /var/tmp/${timedir}_Obj -a analyze,recover -e"
+      ;;
+    2.[3-9].[0-9])  cmd="obj_recover.py -t $tid -l ${full_dir_path}/repair_obj -w /var/tmp/${timedir}_Obj"
+      ;;
+    *)            echo -e "Unknown AET version detected"
+      ;;
+  esac 
+  [[ "$(cat ${full_dir_path}/repair_obj|wc -l)" -ge 1 ]] && { echo -e "$(date): Running Obj_recover.py, please wait...."; python /var/service/AET/workdir/tools/Recovery/ObjRecover/${cmd} &>1 >> /var/tmp/Obj_recover_output; }
   echo -e "$orange Final Report:                                     $white
   Objects triggered: $(egrep -c 'triger_cc_checkObj=Succeed|passed' ${full_dir_path}/repair.log 2>&1) of $(cat ${full_dir_path}/NeedsRecovery|wc -l 2>&1)
   Opened Objects unlocked: $(grep -c 'has been successfully unlocked' ${full_dir_path}/repair.log 2>&1) of $(cat ${full_dir_path}/OpenedObjectList|wc -l 2>&1)
   0kb objects deleted: $(grep -c '"successfully deleted"' ${full_dir_path}/repair.log 2>&1) of $(cat ${full_dir_path}/ObjectID_0_KB|wc -l 2>&1)
   Needs more investigation: $(cat ${full_dir_path}/NeedsWork|wc -l)" # Final Report
-  [[ $(cat ${full_dir_path}/NeedsWork|wc -l) -ge 1 ]] && { echo "Please see ${full_dir_path}/NeedsWork"; }
+  [[ $(cat ${full_dir_path}/NeedsWork|wc -l) -ge 1 && $pass = 'yes' ]] && { echo -e "$orange Investation Report:     $white    
+  EC_bug Object(s) detected: $(cat ${full_dir_path}/EC_bug|wc -l)
+  EC_failed write(s) detected: $(cat ${full_dir_path}/EC_failed_write|wc -l)
+  EC_failed delete(s) detected: $(cat ${full_dir_path}/EC_failed_delete|wc -l)
+  Object(s) sent to Obj_recover: $(cat ${full_dir_path}/repair_obj|wc -l)
+  Unknown: $(cat ${full_dir_path}/unknown|wc -l)"; } || { [[ $(cat ${full_dir_path}/NeedsWork|wc -l) -ge 1 ]] && { echo -e "Please send the investigation object(s) to the DR Team"; }; } 
+  [[ -s /var/tmp/${timedir}_Obj/no_recover.obj.policymismatch ]] && { Policymismatch="Policymismatch Object(s): $(cat /var/tmp/${timedir}_Obj/no_recover.obj.policymismatch|wc -l)"; }
+  [[ $(cat ${full_dir_path}/repair_obj|wc -l) -ge 1 && $pass = 'yes' ]] && { echo -e "$orange Obj_recover Report:${white}\n  Garbage Object(s): $(cat /var/tmp/${timedir}_Obj/no_recover.obj.garbage|wc -l)\n  DL Object(s): $(cat /var/tmp/${timedir}_Obj/no_recover.obj.DL|wc -l)\n  Recoverying Objects: $(cat /var/tmp/${timedir}_Obj/recover.obj|wc -l)\n  $Policymismatch ";  }
+  [[ $(cat ${full_dir_path}/EC_*|wc -l) -ge 1 || -a /var/tmp/${timedir}_Obj/no_recover.obj.DL || $(cat ${full_dir_path}/unknown|wc -l) -ge 1 ]] && { echo "Please check object(s) in ${full_dir_path}/Val_count.output"; }
   recovery_status=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select status from recoverytasks where fsuuid='$fsuuid'"|tr -d ' '| grep -v "^$" )
   [[ ! "$recovery_status" =~ ^[2-3] ]] && { echo "Fsuuid $fsuuid is not In-progress. Submitting $fsuuid to In-progress" && bash /var/service/recoverdisk.sh -s $fsuuid; }
 }
-while getopts "sf:vh" options; do
+while getopts "sp:f:vh" options; do
   case $options in
     s)  unsafe=1
         ;;
-    a)  Js_locked
+    p)  passphase=$OPTARG
         ;;
     f)  fsuuid=$OPTARG
         main

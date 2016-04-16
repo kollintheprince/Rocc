@@ -1,6 +1,6 @@
 #!/bin/bash
 # Created by Kollin Prince (kollin.prince@emc.com)
-# Contributor Claiton Weeks
+# Contributors Claiton Weeks, Taylin Harrison
 ################################
 # This script will find all the unmounted ss/mds disks and output the fsuuid, devpath, if replaceable, and the status in recoverytasks.
 ################################
@@ -10,7 +10,7 @@
 # 1.5.9 Fixed internal log issue with the disks.info file and fixed function loop.
 # 1.5.9a Added a new option -s, Allowed to override the disk health and mark it VERIFIED_BAD
 # See more at https://github.com/kollintheprince/Rocc/
-version=1.6.1
+version=1.6.2
 
 Usage() { # Displays how to run the tool.
   echo "
@@ -48,6 +48,20 @@ normal='\E[0m'
 touch /var/service/local.output; touch /var/service/output.txt
 rmgmaster=$(awk -F "," '/localDb/{print $2}' /etc/maui/cm_cfg.xml)
 system_master=$(awk -F 'value="|,' '/systemDb/{print $2}' /etc/maui/cm_cfg.xml)
+hardware_product=$(dmidecode | awk '/Product Name/{print $NF; exit}') # Gets and sets HW Gen.
+case "$hardware_product" in
+  1950)                   # > Dell 1950 is the Gen 1 hardware
+  hardware_gen=1
+    ;;
+  R610)                       # > Dell r610 is the Gen 2 hardware.
+  hardware_gen=2
+    ;;
+  S2600JF)                    # > Product Name: S2600JF is Gen3
+  hardware_gen=3
+    ;;
+  *)  cleanup "Invalid hardware information. Could not determine generation. Please email Kollin.Prince@emc.com to get corrected. "
+    ;;
+esac
 pre_system_info() { # Gathering system/disk# information
   TotalPdisks=$(awk -F "<theoreticalDiskNum>|</theoreticalDiskNum>" '/theoreticalDiskNum/{print $2}' /var/local/maui/atmos-diskman/NODE/$(hostname)/latest.xml)
   if [[ $TotalPdisks -le 60 && $TotalPdisks -gt 30 ]]; then # Making sure the numbers are either 60-30-15 so the calc ratio doesn't go into infinite loop
@@ -134,7 +148,7 @@ assign_sr() { # Assigning the SR to the fsuuid
     [[ $yousure =~ [nN] ]] && { echo 'Exiting'; exit 16; } 
   fi
   echo $assign_disk","$sr > /var/service/$assign_disk.tmp
-  /usr/bin/scp /var/service/$assign_disk.tmp $host:/var/service/fsuuid_SRs/$assign_disk.txt
+  /usr/bin/scp -q /var/service/$assign_disk.tmp $host:/var/service/fsuuid_SRs/$assign_disk.txt
   /bin/rm -f /var/service/$assign_disk.tmp
 }
 disk_health_check() { # Checking the disk health function
@@ -199,13 +213,12 @@ SRinput() { # How to assign an SR to an specific fsuuid or serial number
 }
 disk_replaceable_info() { # Gathering disk replaceable information
   serialnumber=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select diskuuid from fsdisks where fsuuid='$disk'"|tr -d ' '| grep -v "^$")
-  [[ $(echo $serialnumber | awk '{print length}') -ne 8 ]] && return 1
   diskstatus=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select status from disks where uuid='$serialnumber'"|tr -d ' '| grep -v "^$")
   replacement=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select replacable from disks where uuid='$serialnumber'"|tr -d ' '| grep -v "^$")
   unrec=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select unrecoverobj from recoverytasks where fsuuid='${disk}'"| awk 'NR==1{print $1}')
-  imprec=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select impactobj from recoverytasks where fsuuid='${disk}'"| awk 'NR==1{print $1}')
+  impac=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select impactobj from recoverytasks where fsuuid='${disk}'"| awk 'NR==1{print $1}')
   [[ $(echo ${#unrec}) -eq 0 ]] && Rpercent=$(echo -e $cyan"Not found"$white)
-  [[ $unrec -eq 0 || $imprec -eq 0 ]] && percent=0 || percent=$(echo "scale=6; 100-$unrec*100/$imprec"|bc|cut -c1-5)
+  [[ $unrec -eq 0 || $impac -eq 0 ]] && percent=0 || percent=$(echo "scale=6; 100-$unrec*100/$impac"|bc|cut -c1-5)
   Rpercent=$(echo -e $yellow$percent"%"$white "Unrecovered: "$yellow$unrec$white)
 }
 progress() { # Progress bar function
@@ -253,13 +266,14 @@ replacementdisk () {  # Checks the status of the recovery and replacement.
         ;;
     0:[46]:2)    echo -e $green"Recovery completed,"$white" however the replaceable bit needs to be changed to a 1 in the disks table and atmos-diskman/DISK/latest.xml"  >> /var/service/local.output
         ;;
-    0:[46]:3)    echo -e "Replaceable="$red"No"$white "RecoveryStatus="$green"In Progress"$white "Recovery="$Rpercent >> /var/service/local.output
+    0:[46]:3)    recovery_eta $disk $unrec $impac  
+      echo -e "Replaceable="$red"No"$white "RecoveryStatus="$green"In Progress"$white "Recovery="$Rpercent "Obj/sec=$yellow${ops}$white ETA_days=$yellow${eta_days}$white ETA_date=$yellow$real_date$white" >> /var/service/local.output
         ;;
     0:[46]:[45]) echo -e "Replaceable="$red"No"$white "RecoveryStatus="$red"FAILED"$white "Recovery="$Rpercent >> /var/service/local.output
         ;;
     0:[46]:6)    echo -e "Replaceable="$red"No"$white "RecoveryStatus="$yellow"Pending"$white "Recovery="$Rpercent >> /var/service/local.output
         ;;
-    1:6:[13456]) echo "The disk is set for replaceable, but the recovery has not completed... Status: ${recoverystatus} Please finish the recovery before dispatching." >> /var/service/local.output
+    1:6:[13456]) echo "Disk is set replaceable, but the recovery has not completed... Status: ${recoverystatus} Please finish the recovery before dispatching." >> /var/service/local.output
         ;;
     1:[46]:2)       touch /var/service/fsuuid_SRs/${disk}.info
       [[ $(grep -c "Date_replaceable" /var/service/fsuuid_SRs/$disk.info) -lt 1 ]] && for log in $(ls -t /var/log/maui/cm.log*); do
@@ -271,11 +285,11 @@ replacementdisk () {  # Checks the status of the recovery and replacement.
       [[ $(date +%s) -ge $dateplusseven ]] && pastseven=$(echo "The Disk has been replaceable since $setreplaced, please check the SR")
       echo -e "Replaceable="$green"Yes"$white "DiskSize="${yellow}${disksize}"TB"$white $pastseven >> /var/service/local.output
         ;;
-    1:4:*)    echo "The disk is set for replaceable, Disk status is set to 4. The disk may not been seen by the hardware" >> /var/service/local.output
+    1:4:*)    echo "Disk is set replaceable, Disk status is set to 4. The disk may not been seen by the hardware" >> /var/service/local.output
         ;;
     0:[46]:*)    echo -e "Replaceable="$red"No"$white "RecoveryStatus="$cyan"Not found"$white "Recovery="$Rpercent >> /var/service/local.output
         ;;
-    1:*:*)    echo -e "Disk is set for replaceable, but disk status is incorrect. Please update disk status=6 in the disks table" >> /var/service/local.output
+    1:*:*)    echo -e "Disk is set replaceable, but disk status is incorrect. Please update disk status=6 in the disks table" >> /var/service/local.output
         ;;
     0:204:*)  echo -e "Disk is in 204 status, please investigate the disk" >> /var/service/local.output
         ;;
@@ -309,20 +323,6 @@ output_info() { # Set up for what will be outputted to the user.
   echo -e "Devpath: "${red}${dev}${white} "FSUUID: "${red}${disk}${white} >> /var/service/local.output
   echo -e "Disk_type: "${yellow}${type}${white} "slotID: "${yellow}${slotID}${white} "Health: "${diskh} "SN: "${yellow}${serialnumber}${white}  >> /var/service/local.output; unset display_dd
 }
-hardware_product=$(dmidecode | awk '/Product Name/{print $NF; exit}') # Gets and sets HW Gen.
-case "$hardware_product" in
-  1950)                   # > Dell 1950 is the Gen 1 hardware
-  hardware_gen=1
-    ;;
-  R610)                       # > Dell r610 is the Gen 2 hardware.
-  hardware_gen=2
-    ;;
-  S2600JF)                    # > Product Name: S2600JF is Gen3
-  hardware_gen=3
-    ;;
-  *)  cleanup "Invalid hardware information. Could not determine generation. Please email Kollin.Prince@emc.com to get corrected. "
-    ;;
-esac
 internaldisk() { # Determine if there is a internal disk issue.
 case "${hardware_gen}" in
   [1-2])
@@ -443,8 +443,8 @@ localrun() { # Finds the un-mounted DAE drives
       fi
     done
     if [[ $SS_disk_total -gt $(($SS_disks_seen+$SS_disk_counter)) ]]; then # Checks if there are any other missing disks
-      for dev in $(awk -F "<osDevPath>|</osDevPath>" '/osDevPath/{print$2}' /var/local/maui/atmos-diskman/DISK/[a-z]*/latest.xml|sort -u); do # Checks for disks not configured properly
-        if ! grep -q $dev /proc/mounts  && [[ $SS_disk_total -gt $(($SS_disks_seen+$SS_disk_counter)) ]]; then # Compares the list to what is mounted with also checking the total of missing disks
+      for dev in $(awk -F "<osDevPath>|</osDevPath>" '/osDevPath/{print$2}' /var/local/maui/atmos-diskman/DISK/[0-9A-Z]*/latest.xml|sort -u); do # Checks for disks not configured properly
+        if ! grep -q $dev /proc/mounts  && [[ $(($MDS_disk_total+$SS_disk_total)) -gt $(($SS_disks_seen+$SS_disk_counter+$MDS_disks_seen+$MDS_disk_counter)) ]]; then # Compares the list to what is mounted with also checking the total of missing disks
           serialnumber=$(smartctl -i $dev | grep Serial | cut -d ' ' -f6)
           disk=$serialnumber
           hardwarediskfind=$(smartctl -i $dev | grep -c failed)
@@ -464,7 +464,7 @@ localrun() { # Finds the un-mounted DAE drives
             slotID='Unknown'
           fi
           slotreplaced=$(psql -U postgres rmg.db -h $rmgmaster -t -c "select slot_replaced from disks where serialnumber='$serialnumber'" |tr -d ' ' | grep -v '^$')
-          [[ $slotreplaced -eq 1 && $manslotreplaced = 'true' ]] && continue
+          [[ $slotreplaced -eq 1 && $manslotreplaced = 'true' || $(grep -c $dev /var/service/local.output) -ge 1 ]] && continue
           SRinput
           SS_disk_counter=$(($SS_disk_counter+1))
           disk='Not Found'; type='Not Configured'
@@ -510,7 +510,9 @@ allrun() { # Running the check on all nodes with the option of an report of what
     then
     echo -e $green"No failed disks found"$white
   else
-    grep -v ssh_exchange_identification /var/service/output.txt 
+    host_list=($(awk '/Host:/{print $2}' /var/service/output.txt|sort -u|sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[m|K]//g")) #sorting the host list by rmg
+    for (( x=0; x<$(awk '/Host:/{print $2}' /var/service/output.txt|sort -u|wc -l); x++));do array[$x]=$(grep -A 5 "${host_list[$x]}" /var/service/output.txt);done
+    echo ${array[@]}|sed -e 's/Host/\n\nHost/g' -e 's/TLA/\nTLA/g' -e 's/Devpath/\nDevpath/g' -e 's/Disk_type/\nDisk_type/g' -e 's/Replaceable/\nReplaceable/g' -e 's/Associated/\nAssociated/g' -e 's/Disk is/\nDisk is/g' -e 's/Unable to/\nUnable to/g' -e 's/Something/\nSomething/g'
   fi
 }
 endreport() { # Set up for what will be outputted to the users in the -ar or -ra option. The end report
@@ -637,28 +639,14 @@ xfs_repair_function() {
   esac
   dev=$(awk -F "<osDevPath>|</osDevPath>" '/osDevPath/{print$2}' /var/local/maui/atmos-diskman/DISK/$serial_number/latest.xml);
   if_mds=$(grep $fsuuid /etc/maui/mds/*/mds_cfg.xml|wc -l)
-  if [[ $if_mds -ne 0 ]]; then # Checks if the disk is an MDS associated with it
-    echo -e $white"Disk $serial_number has mds(s) associated with it... Checking db sizes."
-    mkdir /mnt/temp/; mds_mount=$(mount -t xfs ${dev}1 /mnt/temp/)
-    for mds in $(grep $fsuuid /etc/maui/mds/*/mds_cfg.xml|awk -F '/' '{print $5}');do
-      # Need to check if mounted [[ $(echo $mds_mount |awk '{print length}') -le 1 ]]
-      master=$(mauimdlsutil -q -m  '*' -n $rmgmaster |grep -B 3 $HOSTNAME:$mds|awk '/Master/{print $4}');master_host=$(echo $master |awk -F ':' '{print $1}')
-      master_port=$(echo $master|awk -F ':' '{print $2}')
-      # Check db size section
-      ls -l `mdsdir $mds` |egrep -v '__db|log' > /var/tmp/mds_${mds}_db_size; ssh -q $master_host 'ls -l `mdsdir '$master_port'`'|egrep -v '__db|log' > /var/tmp/mds_${mds}_db_size_peer
-      #Check missing files section
-      dbcheck_list="${tenant_id}_index ${tenant_id}_job ${tenant_id}_key_value ${tenant_id}_lookup ${tenant_id}_metadata ${tenant_id}_readdir ${tenant_id}_tag ${tenant_id}_version container import metric PmDb sessionStateDB tenantDb"
-      for dbcheck in $dbcheck_list;do
-        db_size=$(grep ${dbcheck} /var/tmp/mds_${mds}_db_size|awk '{print $5}')
-        db_size_peer=$(grep ${dbcheck} /var/tmp/mds_${mds}_db_size_peer|awk '{print $5}')
-        diff_percent=$(echo "scale=2; 100-$db_size*100/$db_size_peer"|bc); if_zero_diff=$(echo $diff_percent|awk -F '.' '{print $1}'); [[ -z $if_zero_diff ]] && { diff_percent=0; }
-        [[ $(echo $diff_percent|awk -F '.' '{print $1}') -lt 20 ]] && { echo -e $green"$(date):INFO: Mds below 20% File:${dbcheck}.bdbdb \n Local:${db_size} Peer:${db_size_peer} Percent:${diff_percent}%"$white; } || { echo -e $red"$(date):ERROR: Mds above 20% File:${dbcheck}.bdbdb \n Local:${db_size} Peer:${db_size_peer} Percent:${diff_percent}% ESCALETE TO ENGINEERING PER BUG 36242";error=1; }
-        [[ $(grep -c $dbcheck /var/tmp/mds_${mds}_db_size) -lt 1 ]] && { echo -e $red"ERROR Missing db file $dbcheck on $mds"$white; error=1; }
-      done
-      [[ $error -ge 1 ]] && { echo -e $red"$(date):ERROR: Failed check on missing db files or size check(see above output for details); ESCALETE TO ENGINEERING PER BUG 36242";exit; }
-      echo -e $green"All checks Passed on the MDS(s)"
-    done
-    umount /mnt/temp/
+  if [[ ${coruption_fixed} =~ [nN] ]]; then
+    if [[ $if_mds -ne 0 ]]; then # Checks if the disk is an MDS associated with it
+      echo -e $white"Disk $serial_number has mds(s) associated with it... Checking db sizes."
+      mkdir /mnt/temp/; mds_mount=$(mount -t xfs ${dev}1 /mnt/temp/)
+      check_mds_size
+    fi
+  elif [[ ${coruption_fixed} =~ [yY] ]]; then
+    check_mds_size
   fi
   read -p "Confirmed corruption on $serial_number? [yY][nN]: " -t 60 -n 1 if_xfs_checked;echo
   [[ -z $if_xfs_checked ]] && { if_xfs_checked=y; }
@@ -666,11 +654,33 @@ xfs_repair_function() {
     echo -e "Running xfs_repair -L ${dev}1; disk $serial_number"; echo "$(date): $dev: $serial_number: $fsuuid" >> /var/tmp/${fsuuid}_xfs_repair 
     nohup xfs_repair -L ${dev}1 >> /var/tmp/${fsuuid}_xfs_repair &
     echo -e "Running in the background, please see the progress in /var/tmp/${fsuuid}_xfs_repair"
+    [[ $if_mds -ne 0 ]] && { echo -e $red"Please run the script again to check mds size after the corruption has been fixed"$white; }
   elif [[ ${if_xfs_checked} =~ [nN] ]]; then
     echo -e "Running xfs_check on disk $serial_number"; echo "$(date): $dev: $serial_number: $fsuuid" >> /var/tmp/${fsuuid}_xfs_check
     nohup xfs_check ${dev}1 >> /var/tmp/${fsuuid}_xfs_check &
     echo -e "Running in the background, please see the progress in /var/tmp/${fsuuid}_xfs_check  .... Please run it again if corruption is found."
   fi
+}
+check_mds_size() {
+  for mds in $(grep $fsuuid /etc/maui/mds/*/mds_cfg.xml|awk -F '/' '{print $5}');do
+    [[ $(echo $mds_mount |awk '{print length}') -le 1 ]] && { echo -e $red"Not able to mount to tmp mount, skipping MDS size check section."; break; }
+    master=$(mauimdlsutil -q -m  '*' -n $rmgmaster |grep -B 3 $HOSTNAME:$mds|awk '/Master/{print $4}');master_host=$(echo $master |awk -F ':' '{print $1}')
+    master_port=$(echo $master|awk -F ':' '{print $2}')
+    # Check db size section
+    ls -l `mdsdir $mds` |egrep "bdbdb$|bdbxml$" > /var/tmp/mds_${mds}_db_size; ssh -q $master_host 'ls -l `mdsdir '$master_port'`'|egrep "bdbdb$|bdbxml$" > /var/tmp/mds_${mds}_db_size_peer
+    #Check missing files section
+    dbcheck_list="${tenant_id}_index ${tenant_id}_job ${tenant_id}_key_value ${tenant_id}_lookup ${tenant_id}_metadata ${tenant_id}_readdir ${tenant_id}_tag ${tenant_id}_version container import metric PmDb sessionStateDB tenantDb"
+    for dbcheck in $dbcheck_list;do
+      db_size=$(grep ${dbcheck} /var/tmp/mds_${mds}_db_size|awk '{print $5}')
+      db_size_peer=$(grep ${dbcheck} /var/tmp/mds_${mds}_db_size_peer|awk '{print $5}')
+      diff_percent=$(echo "scale=2; 100-$db_size*100/$db_size_peer"|bc); if_zero_diff=$(echo $diff_percent|awk -F '.' '{print $1}'); [[ -z $if_zero_diff ]] && { diff_percent=0; }
+      [[ $(echo $diff_percent|awk -F '.' '{print $1}') -lt 20 ]] && { echo -e $green"$(date):INFO: Mds below 20% File:${dbcheck}.bdbdb \n Local:${db_size} Peer:${db_size_peer} Percent:${diff_percent}%"$white; } || { echo -e $red"$(date):ERROR: Mds above 20% File:${dbcheck}.bdbdb \n Local:${db_size} Peer:${db_size_peer} Percent:${diff_percent}% ESCALETE TO ENGINEERING PER BUG 36242";error=1; }
+      [[ $(grep -c $dbcheck /var/tmp/mds_${mds}_db_size) -lt 1 ]] && { echo -e $red"ERROR Missing db file $dbcheck on $mds"$white; error=1; }
+    done
+    [[ $error -ge 1 ]] && { echo -e $red"$(date):ERROR: Failed check on missing db files or size check(see above output for details); ESCALETE TO ENGINEERING PER BUG 36242";exit; }
+    echo -e $green"All checks Passed on the MDS(s)"
+  done
+  [[ $(echo $mds_mount |awk '{print length}') -le 1 ]] || { umount /mnt/temp/; }
 }
 multi_repair() { # Not ready yet
   read -p "Please enter a list of serial numbers or fsuuid to be checked/repaired seperated by spaces: " xfs_repair_list
@@ -681,6 +691,13 @@ multi_repair() { # Not ready yet
     xfs_repair $disk
     #[[ $count -eq 2 ]] && {echo ; }
   done
+}
+recovery_eta(){ # $1fsuuid  $2unrec $3impac  Work in progress
+  recovery_start=$(date +%s -d "$(psql -U postgres rmg.db -h $rmgmaster -xt -c "select * from recoverytasks where fsuuid='$1'"|awk '/starttime/{print $3,$4}')")
+  divide_sec=$(($(date +%s)-$recovery_start)); [[ $unrec -eq 0 ]] && { ops=NA;eta_days=NA;real_date=NA; return; }
+  num=$(($3-$2)); ops=$(echo "scale=2; $num/$divide_sec"|bc)
+  eta_days=$(echo -e "scale=2; ((($2/$ops)/60)/60)/24"|bc)
+  real_date=$(date -d @"$(echo -e "($2/$ops)+$(date +%s)"|bc)" +"%F %T")
 }
 while getopts "hlarvcsw:x:" options; do
   case $options in

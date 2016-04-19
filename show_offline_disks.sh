@@ -695,7 +695,7 @@ multi_repair() { # Not ready yet
 recovery_eta(){ # $1fsuuid  $2unrec $3impac  Work in progress
   recovery_start=$(date +%s -d "$(psql -U postgres rmg.db -h $rmgmaster -xt -c "select * from recoverytasks where fsuuid='$1'"|awk '/starttime/{print $3,$4}')")
   divide_sec=$(($(date +%s)-$recovery_start)); [[ $unrec -eq 0 ]] && { ops=NA;eta_days=NA;real_date=NA; return; }
-  num=$(($3-$2)); ops=$(echo "scale=2; $num/$divide_sec"|bc); [[ $ops -eq 0 ]] && { eta_days=NA;real_date=NA; return; }
+  num=$(($3-$2)); ops=$(echo "scale=2; $num/$divide_sec"|bc); [[ $(echo $ops|awk -F '.' '{print$1}') -eq 0 ]] && { eta_days=NA;real_date=NA; return; }
   eta_days=$(echo -e "scale=2; ((($2/$ops)/60)/60)/24"|bc)
   real_date=$(date -d @"$(echo -e "($2/$ops)+$(date +%s)"|bc)" +"%F %T")
 }
